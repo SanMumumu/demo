@@ -1,0 +1,12 @@
+# autoencoder (ideally one per modality)
+CUDA_VISIBLE_DEVICES=2,3,4,5 python3 main.py --config configs/run/train/ae_city_rgb.yaml --output=./debug1
+
+CUDA_VISIBLE_DEVICES=2,3,4,5 python3 main.py --config configs/run/train/ae_city_rgb.yaml --output=./debug1
+
+CUDA_VISIBLE_DEVICES=2,3,4,5 python3 main.py --config configs/run/train/ddpm_city_rgb.yaml --output=./debug1
+
+# single modality diffusion model
+python3 main.py --config configs/run/train/ddpm_city_rgb.yaml
+
+
+tensorboard --logdir=/mnt/data/wangsen/SyncVP/results/ddpm_single_mod_CITYSCAPES_RGB_42 --port=7004
