@@ -1,21 +1,22 @@
 import os
 import time
-from tqdm import tqdm
-
 import torch
-
+import numpy as np
+from tqdm import tqdm
 from tools.data_utils import prepare_input
 from tools.dataloader import get_loaders
 from models.autoencoder.autoencoder_vit import ViTAutoencoder
-from models.ddpm.unet import UNetModel, DiffusionWrapper
-from models.ddpm.multimodal import MultiModalUnet, MMDiffusionWrapper
-from losses.ddpm import DDPM, MMDDPM
+from models.ddpm.dit import DiffusionWrapper, DiT
+# from models.ddpm.multimodal import MultiModalUnet, MMDiffusionWrapper
+from models.ddpm.multimodal import FlowMatchingWrapper, UnifiedDiT
+# from losses.ddpm import DDPM, MMDDPM
 from losses.flowmatching import FlowMatching, MMFlowMatching
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tools.utils import setup_distibuted_training, setup_logger, resume_training
 
 from tools.utils import AverageMeter
-from evals.eval import eval_diffusion, eval_multimodal_diffusion
+from evals.eval import eval_multimodal_diffusion
+from evals.eval import eval_flow_matching
 from models.ema import LitEma
 import copy
 
@@ -72,8 +73,6 @@ def diffusion_training(rank, args):
     if rank == 0:
         log_(f"Loading dataset {args.data} with resolution {args.res}")
         log_(f"Loaded dataset {args.data} from folder {train_loader.dataset.path}")
-
-    if rank == 0:
         log_(f"Generating autoencoder model")
 
     # Instantiate autoencoders and load weights
@@ -87,16 +86,16 @@ def diffusion_training(rank, args):
         autoencoder_model_ckpt = torch.load(args.ae_model)
         autoencoder_model.load_state_dict(autoencoder_model_ckpt)
         # Instantiate diffusion denoising UNet
-        log_(f"Generating UNet model")
+        log_(f"Generating DiT model")
 
-    unet = UNetModel(**args.unetconfig, frames=args.frames)
-
+    backbone = DiT(**args.dit_config, frames=args.frames)
+    
     if rank == 0:
-        num_params = sum(p.numel() for p in unet.parameters())
-        trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
-        log_(f"Unet has {num_params / 1e6:.2f}M parameters, {trainable_params / 1e6:.2f}M are trainable")
+        num_params = sum(p.numel() for p in backbone.parameters())
+        trainable_params = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+        log_(f"DiT has {num_params / 1e6:.2f}M parameters, {trainable_params / 1e6:.2f}M are trainable")
 
-    diffusion_model = DiffusionWrapper(unet).to(device)
+    diffusion_model = DiffusionWrapper(backbone).to(device)
 
     if rank == 0:
         torch.save(diffusion_model.state_dict(), os.path.join(logger.logdir, 'net_init.pth'))
@@ -129,18 +128,10 @@ def diffusion_training(rank, args):
         broadcast_buffers=False,
         find_unused_parameters=False)
 
-    # criterion = DDPM(diffusion_model, channels=args.unetconfig.in_channels,
-    #                  image_size=args.unetconfig.image_size,
-    #                  linear_start=args.ddpmconfig.linear_start,
-    #                  linear_end=args.ddpmconfig.linear_end,
-    #                  log_every_t=args.ddpmconfig.log_every_t,
-    #                  w=args.ddpmconfig.w,
-    #                  ).to(device)
     criterion = FlowMatching(
         diffusion_model,
-        channels=args.unetconfig.in_channels,
-        image_size=args.unetconfig.image_size,
-        timesteps=args.ddpmconfig.timesteps,
+        channels=args.dit_config.in_channels,
+        image_size=args.dit_config.input_size,
         sampling_timesteps=50,
         loss_type='l2'
     ).to(device)
@@ -201,7 +192,7 @@ def diffusion_training(rank, args):
             ema(diffusion_model)
 
         if rank == 0:
-            pbar.set_description(f"DL: {losses['diffusion_loss'].average:.4f}")
+            pbar.set_description(f"Loss: {losses['diffusion_loss'].average:.4f}")
         if it % args.log_freq == 0:
             if logger is not None and rank == 0:
                 logger.scalar_summary('train/diffusion_loss', losses['diffusion_loss'].average, it)
@@ -217,7 +208,7 @@ def diffusion_training(rank, args):
             ema.copy_to(ema_model)
             torch.save(ema_model.module.state_dict(), os.path.join(logger.logdir, f'ema_model_{it}.pth'))
             frames = args.frames + args.cond_frames
-            fvd, ssim, lpips = eval_diffusion(rank, ema_model, autoencoder_model, autoencoder_cond_model,
+            fvd, ssim, lpips = eval_flow_matching(rank, ema_model, autoencoder_model, autoencoder_cond_model,
                                               val_loader, it, samples=args.eval_samples, logger=logger,
                                               frames=frames, cond_frames=args.cond_frames)
             lpips *= 1000
@@ -248,60 +239,48 @@ def multimodal_diffusion_training(rank, args):
     log_, logger = setup_logger(args, rank)
 
     # Dataloaders
-    if rank == 0:
-        log_(f"Loading dataset {args.data} with resolution {args.res}")
-
     train_loader, val_loader, _ = get_loaders(rank, copy.deepcopy(args))
 
     if rank == 0:
+        log_(f"Loading dataset {args.data} with resolution {args.res}")
         log_(f"Loaded dataset {args.data} from folder {train_loader.dataset.path_rgb}")
         log_(f"Generating autoencoder models for all modalities")
 
     # Instantiate autoencoders and load weights
     autoencoder_model_rgb = ViTAutoencoder(args.embed_dim, args.ddconfig).to(device)
     autoencoder_model_depth = ViTAutoencoder(args.embed_dim, args.ddconfig).to(device)
-
-    autoencoder_cond_model_rgb = None
-    autoencoder_cond_model_depth = None
-
-    if args.ae_cond_model != '':
-        autoencoder_cond_model_rgb = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig).to(device)
-        autoencoder_cond_model_depth = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig).to(device)
+    autoencoder_cond_model_rgb = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig).to(device)
+    autoencoder_cond_model_depth = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig).to(device)
 
     if rank == 0:
-        if autoencoder_cond_model_rgb is not None:
-            log_(f"Loading pretrained autoencoder model rgb {args.ae_model} and {args.ae_cond_model}, depth {args.ae_model_depth} and {args.ae_cond_model_depth}")
-            autoencoder_cond_model_rgb_ckpt = torch.load(args.ae_cond_model)
-            autoencoder_cond_model_rgb.load_state_dict(autoencoder_cond_model_rgb_ckpt)
-            autoencoder_cond_model_depth_ckpt = torch.load(args.ae_cond_model_depth)
-            autoencoder_cond_model_depth.load_state_dict(autoencoder_cond_model_depth_ckpt)
-        else:
-            log_(f"Loading pretrained autoencoder model {args.ae_model} and {args.ae_model_depth}")
-
-        if args.ae_model != '':
-            autoencoder_model_rgb_ckpt = torch.load(args.ae_model)
-            autoencoder_model_rgb.load_state_dict(autoencoder_model_rgb_ckpt)
-        if args.ae_model_depth != '':
-            autoencoder_model_depth_ckpt = torch.load(args.ae_model_depth)
-            autoencoder_model_depth.load_state_dict(autoencoder_model_depth_ckpt)
-
-    # Define Multi-modal model based on single modalities ones.
-    if rank == 0:
-        log_(f"Generating UNet model")
+        log_(f"Loading pretrained autoencoder model rgb {args.ae_model} and {args.ae_cond_model}, depth {args.ae_model_depth} and {args.ae_cond_model_depth}")
+        autoencoder_model_rgb_ckpt = torch.load(args.ae_model)
+        autoencoder_model_rgb.load_state_dict(autoencoder_model_rgb_ckpt)
+        autoencoder_model_depth_ckpt = torch.load(args.ae_model_depth)
+        autoencoder_model_depth.load_state_dict(autoencoder_model_depth_ckpt)
+        
+        autoencoder_cond_model_rgb_ckpt = torch.load(args.ae_cond_model)
+        autoencoder_cond_model_rgb.load_state_dict(autoencoder_cond_model_rgb_ckpt)
+        autoencoder_cond_model_depth_ckpt = torch.load(args.ae_cond_model_depth)
+        autoencoder_cond_model_depth.load_state_dict(autoencoder_cond_model_depth_ckpt)
+        # Define Multi-modal model based on single modalities ones.
+        log_(f"Generating DiT model")
         log_(f"Using cross attention with {args.cross_attn_configs} and same noise = {args.same_noise}")
 
-    mm_unet = MultiModalUnet(args.unetconfig, args.unetconfig, args.ddconfig.frames, args.cross_attn_configs,
-                                 args.shared)
-    if args.diffusion_rgb_model != '' and args.diffusion_depth_model != '':
-        mm_unet.load_single_modality_models(args.diffusion_rgb_model, args.diffusion_depth_model)
+    # mm_unet = MultiModalUnet(args.unetconfig, args.unetconfig, args.ddconfig.frames, args.cross_attn_configs,
+    #                              args.shared)
+    # if args.diffusion_rgb_model != '' and args.diffusion_depth_model != '':
+    #     mm_unet.load_single_modality_models(args.diffusion_rgb_model, args.diffusion_depth_model)
+
+    unified_model = UnifiedDiT(**args.unified_dit_config, frames=args.frames).to(device)
 
     if rank == 0:
         # log number of parameters
-        num_params = sum(p.numel() for p in mm_unet.parameters())
-        trainable_params = sum(p.numel() for p in mm_unet.parameters() if p.requires_grad)
-        log_(f"MultiModalUnet has {num_params} parameters, {trainable_params} are trainable")
+        num_params = sum(p.numel() for p in unified_model.parameters())
+        trainable_params = sum(p.numel() for p in unified_model.parameters() if p.requires_grad)
+        log_(f"MultiModalDiT has {num_params / 1e6:.2f}M  parameters, {trainable_params / 1e6:.2f}M  are trainable")
 
-    diffusion_model = MMDiffusionWrapper(mm_unet).to(device)
+    diffusion_model = FlowMatchingWrapper(unified_model).to(device)
 
     if rank == 0:
         torch.save(diffusion_model.state_dict(), os.path.join(logger.logdir, 'net_init.pth'))
@@ -320,17 +299,17 @@ def multimodal_diffusion_training(rank, args):
         broadcast_buffers=False,
         find_unused_parameters=False)
 
-    if autoencoder_cond_model_rgb is not None:
-        autoencoder_cond_model_rgb = torch.nn.parallel.DistributedDataParallel(
-            autoencoder_cond_model_rgb,
-            device_ids=[device],
-            broadcast_buffers=False,
-            find_unused_parameters=False)
-        autoencoder_cond_model_depth = torch.nn.parallel.DistributedDataParallel(
-            autoencoder_cond_model_depth,
-            device_ids=[device],
-            broadcast_buffers=False,
-            find_unused_parameters=False)
+    autoencoder_cond_model_rgb = torch.nn.parallel.DistributedDataParallel(
+        autoencoder_cond_model_rgb,
+        device_ids=[device],
+        broadcast_buffers=False,
+        find_unused_parameters=False)
+    
+    autoencoder_cond_model_depth = torch.nn.parallel.DistributedDataParallel(
+        autoencoder_cond_model_depth,
+        device_ids=[device],
+        broadcast_buffers=False,
+        find_unused_parameters=False)
 
     if args.scale_lr:
         args.lr *= args.batch_size
@@ -347,6 +326,7 @@ def multimodal_diffusion_training(rank, args):
         log_(f"Loading pretrained model from {args.diffusion_model}")
         diffusion_model.load_state_dict(torch.load(args.diffusion_model))
 
+    diffusion_model = torch.compile(diffusion_model, mode="reduce-overhead")
     diffusion_model = torch.nn.parallel.DistributedDataParallel(
         diffusion_model,
         device_ids=[device],
@@ -355,9 +335,8 @@ def multimodal_diffusion_training(rank, args):
 
     criterion = MMFlowMatching(
         diffusion_model,
-        channels=args.unetconfig.in_channels,
-        image_size=args.unetconfig.image_size,
-        timesteps=args.ddpmconfig.timesteps,
+        channels=args.unified_dit_config.in_channels,
+        image_size=args.unified_dit_config.input_size,
         sampling_timesteps=50,
         same_noise=args.same_noise
     ).to(device)
@@ -418,7 +397,24 @@ def multimodal_diffusion_training(rank, args):
                                             autoencoder_cond_model_rgb)
             args.cond_prob = save_prob  # restore the original value
 
-        loss_rgb, loss_depth, loss_dict = criterion(z_rgb.float(), z_depth.float(), c_rgb.float(), c_depth.float())
+        b_size = z_rgb.shape[0]
+        
+        is_sync = np.random.rand() < 0.5
+        if is_sync:
+            # t_rgb = t_depth
+            t_rand = torch.sigmoid(torch.rand((b_size,), device=device))
+            t_rgb = t_rand
+            t_depth = t_rand
+            use_same_noise = True
+        else:
+            # Independent sampling
+            t_rgb = torch.sigmoid(torch.rand((b_size,), device=device))
+            t_depth = torch.sigmoid(torch.rand((b_size,), device=device))
+            use_same_noise = False
+            
+        opt.zero_grad()
+
+        loss_rgb, loss_depth, loss_dict = criterion(z_rgb, z_depth, c_rgb, c_depth, t_rgb, t_depth, same_noise=use_same_noise)
 
         loss = loss_rgb + loss_depth
 
@@ -435,16 +431,13 @@ def multimodal_diffusion_training(rank, args):
             ema(diffusion_model)
 
         if rank == 0:
-            pbar.set_description(f"DL: {losses['diffusion_loss'].average:.4f} | R: {losses['diffusion_loss_rgb'].average:.4f} | D: {losses['diffusion_loss_depth'].average:.4f}")
+            pbar.set_description(f"Loss: {losses['diffusion_loss'].average:.4f} | R: {losses['diffusion_loss_rgb'].average:.4f} | D: {losses['diffusion_loss_depth'].average:.4f}")
         if it % args.log_freq == 0:
             if logger is not None and rank == 0:
                 logger.scalar_summary('train/diffusion_loss', losses['diffusion_loss'].average, it)
                 logger.scalar_summary('train/diffusion_loss_rgb', losses['diffusion_loss_rgb'].average, it)
                 logger.scalar_summary('train/diffusion_loss_depth', losses['diffusion_loss_depth'].average, it)
                 logger.scalar_summary('train/lr', scheduler.get_lr()[0], it)
-                log_('[It %d] [Time %.3f] [Diffusion %f : RGB %f - DEPTH %f]' %
-                     (it, time.time() - start_time, losses['diffusion_loss'].average, losses['diffusion_loss_rgb'].average,
-                      losses['diffusion_loss_depth'].average))
 
             losses = dict()
             losses['diffusion_loss'] = AverageMeter()
@@ -469,11 +462,6 @@ def multimodal_diffusion_training(rank, args):
             lpips_rgb *= 1000
             lpips_depth *= 1000
             l2 *= 100
-
-            # Save scheduler state
-            torch.save(scheduler.state_dict(), os.path.join(logger.logdir, f'scheduler_last.pth'))
-            # Save optimizer state
-            torch.save(opt.state_dict(), os.path.join(logger.logdir, f'opt_last.pth'))
 
             if logger is not None and rank == 0:
                 logger.scalar_summary('test/fvd_rgb', fvd_rgb, it)

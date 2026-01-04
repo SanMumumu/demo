@@ -1,12 +1,13 @@
 import copy
 
 from models.autoencoder.autoencoder_vit import ViTAutoencoder
-from models.ddpm.unet import DiffusionWrapper, UNetModel
-from models.ddpm.multimodal import MultiModalUnet, MMDiffusionWrapper
+from models.ddpm.dit import DiffusionWrapper, DiT
+# from models.ddpm.multimodal import MultiModalUnet, MMDiffusionWrapper
+from models.ddpm.multimodal import FlowMatchingWrapper, UnifiedDiT
 from tools.dataloader import get_loaders
 from tools.utils import Logger, file_name
 import torch
-from evals.eval import eval_autoencoder, eval_diffusion, eval_multimodal_diffusion
+from evals.eval import eval_autoencoder, eval_flow_matching, eval_multimodal_diffusion
 
 
 def setup(args):
@@ -77,8 +78,8 @@ def diffusion_eval(args):
         autoencoder_cond_model = autoencoder_model
 
     log_(f"Loading diffusion model")
-    unet = UNetModel(**args.unetconfig, frames=args.ddconfig.frames)
-    diffusion_model = DiffusionWrapper(unet)
+    backbone = DiT(**args.dit_config, frames=args.frames)
+    diffusion_model = FlowMatchingWrapper(backbone)
     diffusion_model.load_state_dict(torch.load(args.diffusion_model))
     diffusion_model = DummyWrapper(diffusion_model).to(device)
     diffusion_model.eval()
@@ -94,8 +95,8 @@ def diffusion_eval(args):
     trajectories = args.traj if args.traj > 0 else 1
     log_(f"Evaluation on {samples} samples with {trajectories} generated samples")
 
-    fvd, ssim, lpips = eval_diffusion(0, diffusion_model, autoencoder_model, autoencoder_cond_model, test_loader, 0,
-                                      samples, logger, args.frames, args.cond_frames, trajectories, args.ddpmconfig.w)
+    fvd, ssim, lpips = eval_flow_matching(0, diffusion_model, autoencoder_model, autoencoder_cond_model, test_loader, 0,
+                                      samples, logger, args.frames, args.cond_frames, trajectories)
     log_(f"FVD: {fvd}, SSIM: {ssim}, LPIPS: {lpips * 1000}")
 
 
@@ -127,9 +128,16 @@ def multimodal_diffusion_eval(args):
         autoencoder_cond_model_depth = autoencoder_model_depth
 
     log_(f"Loading multi modal diffusion model")
-    unet = MultiModalUnet(args.unetconfig, args.unetconfig, args.ddconfig.frames, args.cross_attn_configs,
-                          args.shared)
-    diffusion_model = MMDiffusionWrapper(unet).to(device)
+    unified_model = UnifiedDiT(
+        input_size=args.unetconfig.image_size // 4, # 假设 VAE 下采样 4 倍
+        in_channels=args.unetconfig.in_channels,    # 通常为 4
+        hidden_size=getattr(args, 'hidden_size', 768),
+        depth=getattr(args, 'depth', 12),
+        num_heads=getattr(args, 'num_heads', 12),
+        frames=args.frames,
+        num_modalities=2  # RGB + Depth
+    ).to(device)
+    diffusion_model = FlowMatchingWrapper(unified_model).to(device)
     diffusion_model.load_state_dict(torch.load(args.diffusion_model))
     diffusion_model = DummyWrapper(diffusion_model).to(device)
     diffusion_model.eval()

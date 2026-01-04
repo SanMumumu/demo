@@ -6,6 +6,7 @@ import torch
 from tools.utils import AverageMeter
 from einops import rearrange
 from losses.ddpm import DDPM, MMDDPM
+from losses.flowmatching import FlowMatching, MMFlowMatching
 
 from evals.fvd.fvd import get_fvd_logits, frechet_distance
 from evals.fvd.download import load_i3d_pretrained
@@ -170,8 +171,8 @@ def eval_autoencoder(rank, model, loader, it, samples, logger=None):
     return fvd.item(), losses['ssim'].average, losses['lpips'].average, losses['psnr'].average
 
 
-def eval_diffusion(rank, ema_model, ae, ae_cond, loader, it, samples=16, logger=None, frames=16, cond_frames=8,
-                   trajectories=1, w=0.):
+def eval_flow_matching(rank, ema_model, ae, ae_cond, loader, it, samples=16, logger=None, frames=16, cond_frames=8,
+                   trajectories=1, sampling_timesteps=50):
     device = torch.device('cuda', rank)
 
     losses = dict()
@@ -182,12 +183,15 @@ def eval_diffusion(rank, ema_model, ae, ae_cond, loader, it, samples=16, logger=
 
     lpips_model = lpips.LPIPS(net='alex')
 
-    diffusion_model = DDPM(ema_model,
-                           channels=ema_model.module.diffusion_model.in_channels,
-                           image_size=ema_model.module.diffusion_model.image_size,
-                           sampling_timesteps=100,
-                           w=w).to(device)
-
+    diffusion_model = FlowMatching(
+        ema_model,
+        channels=ema_model.module.diffusion_model.in_channels,
+        image_size=ema_model.module.diffusion_model.image_size,
+        timesteps=1000,
+        sampling_timesteps=sampling_timesteps,
+        loss_type='l2'
+    ).to(device)
+    
     gt_embeddings = []
     pred_embeddings = []
 
@@ -277,9 +281,8 @@ def eval_diffusion(rank, ema_model, ae, ae_cond, loader, it, samples=16, logger=
 
     return fvd, losses['ssim'].average, losses['lpips'].average
 
-
 def eval_multimodal_diffusion(rank, ema_model, ae_rgb, ae_depth, ae_cond_rgb, ae_cond_depth, loader, it, samples=16, logger=None,
-                              frames=16, cond_frames=8, trajectories=1, w=0., no_depth_cond=False, same_noise=False):
+                              frames=16, cond_frames=8, trajectories=1, w=0., no_depth_cond=False, same_noise=False, sampling_timesteps=50):
     device = torch.device('cuda', rank)
 
     losses = dict()
@@ -292,12 +295,14 @@ def eval_multimodal_diffusion(rank, ema_model, ae_rgb, ae_depth, ae_cond_rgb, ae
     ssim_object = SSIM()
     lpips_model = lpips.LPIPS(net='alex')
 
-    diffusion_model = MMDDPM(ema_model,
-                             channels=ema_model.module.diffusion_model.diff_rgb.diffusion_model.in_channels,
-                             image_size=ema_model.module.diffusion_model.diff_rgb.diffusion_model.image_size,
-                             sampling_timesteps=100,
-                             w=w,
-                             **{'same_noise': same_noise}).to(device)
+    diffusion_model = MMFlowMatching(
+        ema_model,
+        channels=ema_model.module.diffusion_model.in_channels,
+        image_size=ema_model.module.diffusion_model.input_size,
+        sampling_timesteps=sampling_timesteps,
+        loss_type='l2',
+        **{'same_noise': same_noise}
+    ).to(device)
 
     gt_embeddings_rgb = []
     pred_embeddings_rgb = []
@@ -324,12 +329,17 @@ def eval_multimodal_diffusion(rank, ema_model, ae_rgb, ae_depth, ae_cond_rgb, ae
                 break
             c_rgb_init = x_rgb[:, :cond_frames]
             c_depth_init = x_depth[:, :cond_frames]
+            pad_len = (frames - cond_frames) - cond_frames
+            c_rgb_pad = c_rgb_init[:, -1:].repeat(1, pad_len, 1, 1, 1)
+            c_depth_pad = c_depth_init[:, -1:].repeat(1, pad_len, 1, 1, 1)
+            c_rgb_init = torch.cat([c_rgb_init, c_rgb_pad], dim=1)
+            c_depth_init = torch.cat([c_depth_init, c_depth_pad], dim=1)
 
             if cond_frames > 0:
-                c_rgb_init = ae_cond_rgb.module.extract(
+                c_rgb_init = ae_rgb.module.extract(
                     rearrange(c_rgb_init / 127.5 - 1, 'b t c h w -> b c t h w').to(device).detach())
                 if not no_depth_cond:
-                    c_depth_init = ae_cond_depth.module.extract(
+                    c_depth_init = ae_depth.module.extract(
                         rearrange(c_depth_init / 127.5 - 1, 'b t c h w -> b c t h w').to(device).detach())
                 else:
                     c_depth_init = torch.zeros_like(c_rgb_init)

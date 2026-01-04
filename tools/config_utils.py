@@ -4,7 +4,8 @@ def ddpm_config_setup(args):
     config = OmegaConf.load(args.diffusion_config)
     ae_config = OmegaConf.load(args.ae_config)
 
-    args.unetconfig = config.model.params.unet_config
+    # args.unetconfig = config.model.params.unet_config
+    args.dit_config = config.model.params.dit_config
     args.lr = config.model.base_learning_rate if 'base_learning_rate' in config.model else 1e-4
     args.max_iter = config.model.max_iter
     args.res = ae_config.model.params.ddconfig.resolution
@@ -33,7 +34,8 @@ def mmddpm_config_setup(args):
     config = OmegaConf.load(args.diffusion_config)
     ae_config = OmegaConf.load(args.ae_config)
 
-    args.unetconfig = config.model.params.unet_config
+    # args.unetconfig = config.model.params.unet_config
+    args.unified_dit_config = config.model.params.unified_dit_config
     args.lr = config.model.base_learning_rate if 'base_learning_rate' in config.model else 1e-5
     args.max_iter = config.model.max_iter
     args.res = ae_config.model.params.ddconfig.resolution

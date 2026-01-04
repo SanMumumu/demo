@@ -87,8 +87,8 @@ def main():
 
     """ FIX THE RANDOMNESS """
     set_random_seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
     if os.path.exists('.torch_distributed_init'):
         os.remove('.torch_distributed_init')

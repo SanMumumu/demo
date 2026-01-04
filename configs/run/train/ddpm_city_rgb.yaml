@@ -1,5 +1,5 @@
 exp: ddpm
-id: single_mod
+id: DiT_B_single_mod
 data: CITYSCAPES_RGB
 data_folder: data
 n_gpus: 1
@@ -10,4 +10,4 @@ ae_model: /mnt/data/wangsen/SyncVP/results/autoencoder_8frames_CITYSCAPES_RGB_42
 ae_cond_config: configs/autoencoder/2x128x128.yaml
 ae_cond_model: /mnt/data/wangsen/SyncVP/results/autoencoder_2frames_CITYSCAPES_RGB_42/model_last.pth # checkpoints/ae_rgb_2f_cityscapes.pth
 
-diffusion_config: configs/diffusion/128x128.yaml
+diffusion_config: configs/diffusion/DiT_B_128x128.yaml

@@ -68,18 +68,17 @@ def prepare_input(it, x, diffusion_model, device, autoencoder_model, args, autoe
         p = np.random.random()
 
     if p < args.cond_prob:
-        c, x = x[:, :, :args.cond_frames], x[:, :, args.cond_frames:]
-        mask = (c + 1).contiguous().view(c.size(0), -1) ** 2
-        mask = torch.where(mask.sum(dim=-1) > 0, 1, 0).view(-1, 1, 1)
-
+        c_raw, x_tmp = x[:, :, :args.cond_frames], x[:, :, args.cond_frames:]
+        pad_len = x_tmp.size(2) - c_raw.size(2)
+        pad_part = c_raw[:, :, -1:].repeat(1, 1, pad_len, 1, 1)
+        c_padded = torch.cat([c_raw, pad_part], dim=2)
         with autocast():
             with torch.no_grad():
-                z = autoencoder_model.module.extract(x).detach()
-                if autoencoder_cond_model is not None:
-                    c = autoencoder_cond_model.module.extract(c).detach()
-                else:
-                    c = autoencoder_model.module.extract(c).detach()
-                c = c * mask + torch.zeros_like(c).to(c.device) * (1 - mask)
+                z = autoencoder_model.module.extract(x_tmp).detach()
+                # if autoencoder_cond_model is not None:
+                #     cond = autoencoder_cond_model.module.extract(c).detach()
+                # else:
+                cond = autoencoder_model.module.extract(c_padded).detach()
     else:
         c, x_tmp = x[:, :, :args.cond_frames], x[:, :, args.cond_frames:]
         mask = (c + 1).contiguous().view(c.size(0), -1) ** 2
@@ -91,6 +90,6 @@ def prepare_input(it, x, diffusion_model, device, autoencoder_model, args, autoe
         with autocast():
             with torch.no_grad():
                 z = autoencoder_model.module.extract(x).detach()
-                c = torch.zeros_like(z).to(device)
+                cond = torch.zeros_like(z).to(device)
 
-    return z, c, p
+    return z, cond, p
