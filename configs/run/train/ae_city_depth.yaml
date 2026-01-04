@@ -1,7 +1,0 @@
-exp: autoencoder
-id: 8frames
-data: CITYSCAPES_DEPTH
-data_folder: data
-n_gpus: 2
-batch_size: 4
-ae_config: configs/autoencoder/8x128x128.yaml
