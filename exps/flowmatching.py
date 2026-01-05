@@ -172,7 +172,8 @@ def flowmatching_training(rank, args):
         pbar.update(1)
         z, c, _ = prepare_input(it, x, fm_model, device, autoencoder_model, args, autoencoder_cond_model)
 
-        # (loss, t), loss_dict = criterion(z.float(), c.float())
+        opt.zero_grad()
+        
         loss, loss_dict = criterion(z.float(), c.float())
         
         loss.backward()

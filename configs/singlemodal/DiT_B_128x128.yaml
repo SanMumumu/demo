@@ -2,7 +2,7 @@ model:
   base_learning_rate: 1.0e-4
   cond_prob: 0.7
   eval_freq: 10000
-  eval_samples : 16
+  eval_samples : 4
   log_freq: 1000
   resume: False
   max_iter: 1000000
