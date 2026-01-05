@@ -1,5 +1,5 @@
 # autoencoder (ideally one per modality)
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 main.py --config config_run/train_ae/ae_city_rgb.yaml --num_workers 8 --output=./debug1
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 main.py --config config_run/train_ae/ae_city_rgb.yaml --num_workers 12 --output=./Archived_AE
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 main.py --config config_run/train_fm/fm_city_rgb.yaml --num_workers 8 --output=./debug1
 

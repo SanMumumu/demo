@@ -1,6 +1,7 @@
 import copy
 
 from models.autoencoder.autoencoder_vit import ViTAutoencoder
+from models.autoencoder.autoencoder_vit_rope import ViTAutoencoder
 from models.fm.DiT import FMWrapper, DiT
 from models.fm.uniDiT import FlowMatchingWrapper, UnifiedDiT
 from tools.dataloader import get_loaders

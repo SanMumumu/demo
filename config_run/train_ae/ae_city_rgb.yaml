@@ -1,7 +1,7 @@
 exp: autoencoder
-id: 8frames
+id: 8frames_ROPE
 data: CITYSCAPES_RGB
 data_folder: data
-n_gpus: 1
-batch_size: 1
+n_gpus: 4
+batch_size: 4
 ae_config: configs/autoencoder/8x128x128.yaml

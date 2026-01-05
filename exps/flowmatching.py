@@ -5,7 +5,8 @@ import numpy as np
 from tqdm import tqdm
 from tools.data_utils import prepare_input
 from tools.dataloader import get_loaders
-from models.autoencoder.autoencoder_vit import ViTAutoencoder
+# from models.autoencoder.autoencoder_vit import ViTAutoencoder
+from models.autoencoder.autoencoder_vit_rope import ViTAutoencoder
 from models.fm.DiT import FMWrapper, DiT
 from models.fm.uniDiT import FlowMatchingWrapper, UnifiedDiT
 from losses.fm import FlowMatching, MMFlowMatching
@@ -213,8 +214,8 @@ def flowmatching_training(rank, args):
                 logger.scalar_summary('test/fvd', fvd, it)
                 logger.scalar_summary('test/ssim', ssim, it)
                 logger.scalar_summary('test/lpips', lpips, it)
-                log_('[It %d] [Time %.3f] [FVD PRED %f] [SSIM %.2f] [LPIPS %.2f]' %
-                     (it, time.time() - check, fvd, ssim, lpips))
+                log_('[It %d] [FVD PRED %f] [SSIM %.2f] [LPIPS %.2f]' %
+                     (it, fvd, ssim, lpips))
 
     pbar.close()
     if rank == 0:
@@ -464,8 +465,8 @@ def multimodal_flowmatching_training(rank, args):
                 logger.scalar_summary('test/lpips_depth', lpips_depth, it)
                 logger.scalar_summary('test/l2', l2, it)
 
-                log_('[It %d] [Time %.3f] [FVD_RGB %f] [FVD_DEPTH %f] [SSIM RGB %.2f - DEPTH %.2f] [LPIPS RGB %.2f - DEPTH %.2f] [L2 %.4f]' %
-                    (it, time.time() - start_time, fvd_rgb, fvd_depth, ssim_rgb, ssim_depth, lpips_rgb, lpips_depth, l2))
+                log_('[It %d] [FVD_RGB %f] [FVD_DEPTH %f] [SSIM RGB %.2f - DEPTH %.2f] [LPIPS RGB %.2f - DEPTH %.2f] [L2 %.4f]' %
+                    (it, fvd_rgb, fvd_depth, ssim_rgb, ssim_depth, lpips_rgb, lpips_depth, l2))
 
     pbar.close()
     if rank == 0:

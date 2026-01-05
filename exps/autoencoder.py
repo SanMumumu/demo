@@ -6,7 +6,8 @@ import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from tools.dataloader import get_loaders
-from models.autoencoder.autoencoder_vit import ViTAutoencoder
+# from models.autoencoder.autoencoder_vit import ViTAutoencoder
+from models.autoencoder.autoencoder_vit_rope import ViTAutoencoder
 from losses.perceptual import LPIPSWithDiscriminator
 from torch.cuda.amp import GradScaler, autocast
 from tools.utils import AverageMeter, setup_distibuted_training, setup_logger
@@ -113,9 +114,6 @@ def autoencoder_training(rank, args):
         log_(f"Lr: {scheduler.get_last_lr()[0]}")
 
         del model_ckpt
-
-    if rank == 0:
-        torch.save(model.state_dict(), os.path.join(logger.logdir, 'net_init.pth'))
 
     model = torch.nn.parallel.DistributedDataParallel(model,
                                                       device_ids=[device],
@@ -234,14 +232,14 @@ def autoencoder_training(rank, args):
                     logger.scalar_summary('test/ssim', ssim, it)
                     logger.scalar_summary('test/lpips', lpips, it)
 
-                    log_('[It %d] [Time %.3f] [AELoss %f] [DLoss %f] [PSNR %.2f] [FVD %.2f] [SSIM %.2f] [LPIPS %.2f]' %
-                         (it, time.time() - check, losses['ae_loss'].average, losses['d_loss'].average, psnr, fvd, ssim,
-                          lpips))
+                    log_('[It %d] [AELoss %f] [DLoss %f] [PSNR %.2f] [FVD %.2f] [SSIM %.2f] [LPIPS %.2f]' %
+                         (it, psnr, fvd, ssim, lpips))
                 else:
-                    log_('[It %d] [Time %.3f] [AELoss %f] [DLoss %f]' %
-                         (it, time.time() - check, losses['ae_loss'].average, losses['d_loss'].average))
+                    log_('[It %d] [AELoss %f] [DLoss %f]' %
+                         (it, losses['ae_loss'].average, losses['d_loss'].average))
 
                 torch.save(model.module.state_dict(), os.path.join(logger.logdir, 'model_last.pth'))
+                torch.save(opt.state_dict(), os.path.join(logger.logdir, 'opt.pth'))
 
             losses = dict()
             losses['ae_loss'] = AverageMeter()
