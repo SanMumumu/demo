@@ -233,7 +233,8 @@ def autoencoder_training(rank, args):
                     logger.scalar_summary('test/lpips', lpips, it)
 
                     log_('[It %d] [AELoss %f] [DLoss %f] [PSNR %.2f] [FVD %.2f] [SSIM %.2f] [LPIPS %.2f]' %
-                         (it, psnr, fvd, ssim, lpips))
+                         (it, losses['ae_loss'].average, losses['d_loss'].average, psnr, fvd, ssim,
+                          lpips))
                 else:
                     log_('[It %d] [AELoss %f] [DLoss %f]' %
                          (it, losses['ae_loss'].average, losses['d_loss'].average))
