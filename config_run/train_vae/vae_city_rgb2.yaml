@@ -1,0 +1,7 @@
+exp: vae
+id: 2frames
+data: CITYSCAPES_RGB
+data_folder: data
+n_gpus: 8
+batch_size: 2
+ae_config: configs/vae/2x128x128.yaml

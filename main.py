@@ -1,0 +1,126 @@
+import sys;
+sys.path.extend(['.'])
+
+import yaml
+import os
+import argparse
+import torch
+from exps.vae import autoencoder_training
+from exps.flowmatching import flowmatching_training, multimodal_flowmatching_training
+from evals.run_eval import flowmatching_eval, multimodal_flowmatching_eval, autoencoder_eval
+from tools.utils import set_random_seed
+from tools.config_utils import fm_config_setup, autoencoder_config_setup, mmfm_config_setup
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--config", type=str, help="Path to config file for all next arguments")
+
+""" General arguments """
+parser.add_argument('--exp', type=str, default='fm', help='Type of training to run [vae, fm, mmfm]')
+parser.add_argument('--seed', type=int, default=42, help='random seed')
+parser.add_argument('--id', type=str, default='', help='experiment identifier')
+parser.add_argument('--n_gpus', type=int, default=1, help='Number of GPUs to use')
+parser.add_argument('--num_workers', type=int, default=0, help='Number of workers for dataloader')
+parser.add_argument('--output', type=str, default='./results', help='Output directory where to store exp results')
+
+""" Args about Data """
+parser.add_argument('--data', type=str, default='UCF101',
+                    help='Dataset identifier, must be implemented in get_loaders()')
+parser.add_argument('--batch_size', type=int, default=32,
+                    help='Batch size for training (will be split over gpus if n_gpus > 1)')
+parser.add_argument('--data_folder', type=str, default='', help='path to datasets root folder')
+
+""" Args about latent vae """
+parser.add_argument('--ae_config', type=str, default='configs/8x128x128.yaml',
+                    help='the path of vae config for the main modality')
+parser.add_argument('--ae_cond_config', type=str, default='',
+                    help='conditional frames may have a different vae config if specified')
+
+parser.add_argument('--ae_model', type=str, default='', help='vae pretrained weights for the main modality')
+parser.add_argument('--ae_cond_model', type=str, default='',
+                    help='vae pretrained weights for the conditional frames, if not specified, the same as ae_model')
+
+# for GAN resume
+parser.add_argument('--ae_folder', type=str, default='', help='the folder of the vae training before GAN')
+
+# Second modality vae - here we assume depth as default
+parser.add_argument('--ae_model_depth', type=str, default='',
+                    help='vae pretrained weights for the depth modality')
+parser.add_argument('--ae_cond_model_depth', type=str, default='',
+                    help='vae pretrained weights for the depth conditional frames, if not specified, the same as ae_model_depth')
+
+""" Args about fm models """
+parser.add_argument('--fm_config', type=str, default='',
+                    help='the path of fm model config, whether it is a single modality or multimodal')
+parser.add_argument('--fm_model', type=str, default='',
+                    help='path for pretrained fm model (e.g. needed for resume)')
+
+# Modality specific models needed to start training the multimodal fm model
+parser.add_argument('--fm_rgb_model', type=str, default='', help='the path of pretrained model for rgb')
+parser.add_argument('--fm_depth_model', type=str, default='', help='the path of pretrained model for depth')
+
+""" Lr scheduler settings """
+parser.add_argument('--no_sched', action='store_true', help='load scheduler or start from new one')
+parser.add_argument('--scale_lr', action='store_true', help='scale learning rate for batch size')
+
+""" Evaluation parameters """
+parser.add_argument('--eval', action='store_true', help='Run in evaluation mode')
+parser.add_argument('--samples', type=int, default=0, help='Number of samples to use for evaluation (0 = all)')
+parser.add_argument('--traj', type=int, default=1, help='Number of multiple trajectories to predict per sample')
+parser.add_argument('--no_depth_cond', action='store_true', help='Predict without using past depth conditoining frames')
+parser.add_argument('--train', action='store_true', help='Evaluate on train set')
+parser.add_argument('--future_frames', type=int, default=28, help='Number of future frames to predict')
+
+def main():
+    """ Additional args ends here. """
+    args = parser.parse_args()
+
+    if args.config:
+        with open(args.config, "r") as f:
+            yaml_config = yaml.safe_load(f)
+
+        # Update argparse arguments with YAML values
+        for key, value in yaml_config.items():
+            setattr(args, key, value)
+
+    """ FIX THE RANDOMNESS """
+    set_random_seed(args.seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+    if os.path.exists('.torch_distributed_init'):
+        os.remove('.torch_distributed_init')
+
+    """ RUN THE EXP """
+    if args.exp == 'fm':
+        args = fm_config_setup(args)
+        if args.eval:
+            runner = flowmatching_eval
+        else:
+            runner = flowmatching_training
+    elif args.exp == 'mmfm':
+        args = mmfm_config_setup(args)
+        if args.eval:
+            runner = multimodal_flowmatching_eval
+        else:
+            runner = multimodal_flowmatching_training
+    elif args.exp == 'vae':
+        args = autoencoder_config_setup(args)
+        if args.eval:
+            runner = autoencoder_eval
+        else:
+            runner = autoencoder_training
+    else:
+        raise ValueError("Unknown experiment.")
+
+    if args.n_gpus == 1 or args.eval:
+        if args.eval:
+            runner(args)
+        else:
+            runner(rank=0, args=args)
+    else:
+        torch.multiprocessing.spawn(fn=runner, args=(args,), nprocs=args.n_gpus)
+
+
+if __name__ == '__main__':
+    main()

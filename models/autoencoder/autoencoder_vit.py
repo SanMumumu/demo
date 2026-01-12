@@ -1,0 +1,281 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from models.vae.vit_modules import TimeSformerEncoder, TimeSformerDecoder
+from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
+
+
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        return self.fn(self.norm(x), **kwargs)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Attention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
+        super().__init__()
+        inner_dim = dim_head * heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.dropout_p = dropout
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
+
+    def forward(self, x):
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v, 
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False
+        )
+        
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+
+# ---------------------------------------------------------------------
+# Transformer now uses checkpointing for each layer block.
+class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, Attention(dim, heads=heads, dim_head=dim_head, dropout=dropout)),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout))
+            ]))
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        return x
+
+
+# ---------------------------------------------------------------------
+# ViTAutoencoder uses checkpointing for the encode and decode passes.
+class ViTAutoencoder(nn.Module):
+    def __init__(self,
+                 embed_dim,
+                 ddconfig,
+                 image_key="image",
+                 ):
+        super().__init__()
+        self.splits = ddconfig["splits"]
+        self.s = ddconfig["frames"] // self.splits
+
+        if isinstance(ddconfig["resolution"], int):
+            self.res_h = ddconfig["resolution"]
+            self.res_w = ddconfig["resolution"]
+        else:
+            self.res_h = ddconfig["resolution"][0]
+            self.res_w = ddconfig["resolution"][1]
+
+        self.embed_dim = embed_dim
+        self.image_key = image_key
+
+        patch_size = 8
+        self.down = 3
+
+        max_res = self.res_h if self.res_h > self.res_w else self.res_w
+        if max_res == 128 or max_res == 64:
+            patch_size = 4
+            self.down = 2
+
+        self.encoder = TimeSformerEncoder(dim=ddconfig["channels"],
+                                          image_size=max_res,
+                                          num_frames=ddconfig["frames"],
+                                          channels=ddconfig["in_channels"],
+                                          depth=ddconfig["layers"] if "layers" in ddconfig else 8,
+                                          patch_size=patch_size)
+
+        self.decoder = TimeSformerDecoder(dim=ddconfig["channels"],
+                                          image_size=max_res,
+                                          num_frames=ddconfig["frames"],
+                                          channels=ddconfig["in_channels"],
+                                          depth=ddconfig["layers"] if "layers" in ddconfig else 8,
+                                          patch_size=patch_size)
+
+        self.to_pixel = nn.Sequential(
+            Rearrange('b (t h w) c -> (b t) c h w', h=self.res_h // patch_size, w=self.res_w // patch_size),
+            nn.ConvTranspose2d(ddconfig["channels"], ddconfig["out_channels"], kernel_size=(patch_size, patch_size),
+                               stride=patch_size),
+        )
+
+        self.act = nn.Sigmoid()
+        ts = torch.linspace(-1, 1, steps=self.s).unsqueeze(-1)
+        self.register_buffer('coords', ts)
+
+        self.xy_token = nn.Parameter(torch.randn(1, 1, ddconfig["channels"]))
+        self.xt_token = nn.Parameter(torch.randn(1, 1, ddconfig["channels"]))
+        self.yt_token = nn.Parameter(torch.randn(1, 1, ddconfig["channels"]))
+
+        self.xy_pos_embedding = nn.Parameter(torch.randn(1, self.s + 1, ddconfig["channels"]))
+        self.xt_pos_embedding = nn.Parameter(torch.randn(1, self.res_w // (2 ** self.down) + 1, ddconfig["channels"]))
+        self.yt_pos_embedding = nn.Parameter(torch.randn(1, self.res_h // (2 ** self.down) + 1, ddconfig["channels"]))
+
+        self.xy_quant_attn = Transformer(ddconfig["channels"], 4, 4, ddconfig["channels"] // 8, 512)
+        self.yt_quant_attn = Transformer(ddconfig["channels"], 4, 4, ddconfig["channels"] // 8, 512)
+        self.xt_quant_attn = Transformer(ddconfig["channels"], 4, 4, ddconfig["channels"] // 8, 512)
+
+        self.pre_xy = torch.nn.Conv2d(ddconfig["channels"], self.embed_dim, 1)
+        self.pre_xt = torch.nn.Conv2d(ddconfig["channels"], self.embed_dim, 1)
+        self.pre_yt = torch.nn.Conv2d(ddconfig["channels"], self.embed_dim, 1)
+
+        self.post_xy = torch.nn.Conv2d(self.embed_dim, ddconfig["channels"], 1)
+        self.post_xt = torch.nn.Conv2d(self.embed_dim, ddconfig["channels"], 1)
+        self.post_yt = torch.nn.Conv2d(self.embed_dim, ddconfig["channels"], 1)
+
+    def encode(self, x):
+        # x: b c t h w
+        b = x.size(0)
+        x = rearrange(x, 'b c t h w -> b t c h w')
+        h = self.encoder(x)
+        h = rearrange(h, 'b (t h w) c -> b c t h w', t=self.s, h=self.res_h // (2 ** self.down))
+
+        h_xy = rearrange(h, 'b c t h w -> (b h w) t c')
+        n = h_xy.size(1)
+        xy_token = repeat(self.xy_token, '1 1 d -> bhw 1 d', bhw=h_xy.size(0))
+        h_xy = torch.cat([h_xy, xy_token], dim=1)
+        h_xy += self.xy_pos_embedding[:, :(n + 1)]
+        h_xy = self.xy_quant_attn(h_xy)[:, 0]
+        h_xy = rearrange(h_xy, '(b h w) c -> b c h w', b=b, h=self.res_h // (2 ** self.down))
+
+        h_yt = rearrange(h, 'b c t h w -> (b t w) h c')
+        n = h_yt.size(1)
+        yt_token = repeat(self.yt_token, '1 1 d -> btw 1 d', btw=h_yt.size(0))
+        h_yt = torch.cat([h_yt, yt_token], dim=1)
+        h_yt += self.yt_pos_embedding[:, :(n + 1)]
+        h_yt = self.yt_quant_attn(h_yt)[:, 0]
+        h_yt = rearrange(h_yt, '(b t w) c -> b c t w', b=b, w=self.res_w // (2 ** self.down))
+
+        h_xt = rearrange(h, 'b c t h w -> (b t h) w c')
+        n = h_xt.size(1)
+        xt_token = repeat(self.xt_token, '1 1 d -> bth 1 d', bth=h_xt.size(0))
+        h_xt = torch.cat([h_xt, xt_token], dim=1)
+        h_xt += self.xt_pos_embedding[:, :(n + 1)]
+        h_xt = self.xt_quant_attn(h_xt)[:, 0]
+        h_xt = rearrange(h_xt, '(b t h) c -> b c t h', b=b, h=self.res_h // (2 ** self.down))
+
+        h_xy = self.pre_xy(h_xy)
+        h_yt = self.pre_yt(h_yt)
+        h_xt = self.pre_xt(h_xt)
+
+        h_xy = torch.tanh(h_xy)
+        h_yt = torch.tanh(h_yt)
+        h_xt = torch.tanh(h_xt)
+
+        h_xy = self.post_xy(h_xy)
+        h_yt = self.post_yt(h_yt)
+        h_xt = self.post_xt(h_xt)
+
+        h_xy = h_xy.unsqueeze(-3).expand(-1, -1, self.s, -1, -1)
+        h_yt = h_yt.unsqueeze(-2).expand(-1, -1, -1, self.res_h // (2 ** self.down), -1)
+        h_xt = h_xt.unsqueeze(-1).expand(-1, -1, -1, -1, self.res_w // (2 ** self.down))
+
+        return h_xy + h_yt + h_xt  # torch.cat([h_xy, h_yt, h_xt], dim=1)
+
+    def decode(self, z):
+        dec = self.decoder(z) # [B, 8192, C=192]
+        return 2 * self.act(self.to_pixel(dec)).contiguous() - 1
+
+    def forward(self, input):
+        input = rearrange(input, 'b c (n t) h w -> (b n) c t h w', n=self.splits)
+        z = self.encode(input)
+        dec = self.decode(z)
+        return dec, 0.
+
+    def extract(self, x):
+        b = x.size(0)
+        x = rearrange(x, 'b c t h w -> b t c h w')
+        h = self.encoder(x)
+        h = rearrange(h, 'b (t h w) c -> b c t h w', t=self.s, h=self.res_h // (2 ** self.down))
+
+        h_xy = rearrange(h, 'b c t h w -> (b h w) t c')
+        n = h_xy.size(1)
+        xy_token = repeat(self.xy_token, '1 1 d -> bhw 1 d', bhw=h_xy.size(0))
+        h_xy = torch.cat([h_xy, xy_token], dim=1)
+        h_xy += self.xy_pos_embedding[:, :(n + 1)]
+        h_xy = self.xy_quant_attn(h_xy)[:, 0]
+        h_xy = rearrange(h_xy, '(b h w) c -> b c h w', b=b, h=self.res_h // (2 ** self.down))
+
+        h_yt = rearrange(h, 'b c t h w -> (b t w) h c')
+        n = h_yt.size(1)
+        yt_token = repeat(self.yt_token, '1 1 d -> btw 1 d', btw=h_yt.size(0))
+        h_yt = torch.cat([h_yt, yt_token], dim=1)
+        h_yt += self.yt_pos_embedding[:, :(n + 1)]
+        h_yt = self.yt_quant_attn(h_yt)[:, 0]
+        h_yt = rearrange(h_yt, '(b t w) c -> b c t w', b=b, w=self.res_w // (2 ** self.down))
+
+        h_xt = rearrange(h, 'b c t h w -> (b t h) w c')
+        n = h_xt.size(1)
+        xt_token = repeat(self.xt_token, '1 1 d -> bth 1 d', bth=h_xt.size(0))
+        h_xt = torch.cat([h_xt, xt_token], dim=1)
+        h_xt += self.xt_pos_embedding[:, :(n + 1)]
+        h_xt = self.xt_quant_attn(h_xt)[:, 0]
+        h_xt = rearrange(h_xt, '(b t h) c -> b c t h', b=b, h=self.res_h // (2 ** self.down))
+
+        h_xy = self.pre_xy(h_xy)
+        h_yt = self.pre_yt(h_yt)
+        h_xt = self.pre_xt(h_xt)
+
+        h_xy = torch.tanh(h_xy)
+        h_yt = torch.tanh(h_yt)
+        h_xt = torch.tanh(h_xt)
+
+        h_xy = h_xy.view(h_xy.size(0), h_xy.size(1), -1)
+        h_yt = h_yt.view(h_yt.size(0), h_yt.size(1), -1)
+        h_xt = h_xt.view(h_xt.size(0), h_xt.size(1), -1)
+
+        ret = torch.cat([h_xy, h_yt, h_xt], dim=-1)
+        return ret
+
+    def decode_from_sample(self, h):
+
+        res1 = self.res_h // (2**self.down)
+        res2 = self.res_w // (2**self.down)
+
+        h_xy = h[:, :, 0:res1*res2].view(h.size(0), h.size(1), res1, res2)
+        h_yt = h[:, :, res1*res2:res2*(res1+self.s)].view(h.size(0), h.size(1), self.s, res2)
+        h_xt = h[:, :, res2*(res1+self.s):res2*(res1+self.s)+res1*self.s].view(h.size(0), h.size(1), self.s, res1)
+
+        h_xy = self.post_xy(h_xy)
+        h_yt = self.post_yt(h_yt)
+        h_xt = self.post_xt(h_xt)
+
+        h_xy = h_xy.unsqueeze(-3).expand(-1,-1,self.s,-1, -1)
+        h_yt = h_yt.unsqueeze(-2).expand(-1,-1,-1,res1, -1)
+        h_xt = h_xt.unsqueeze(-1).expand(-1,-1,-1,-1,res2)
+
+        z = h_xy + h_yt + h_xt
+
+        b = z.size(0)
+        dec = self.decoder(z)
+        return 2*self.act(self.to_pixel(dec)).contiguous()-1

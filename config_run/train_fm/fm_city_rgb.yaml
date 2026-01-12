@@ -1,0 +1,13 @@
+exp: fm
+id: DiT_S_single_mod
+data: CITYSCAPES_RGB
+data_folder: data
+n_gpus: 4
+batch_size: 4
+
+ae_config: configs/vae/8x128x128.yaml
+ae_model: Archived_AE/autoencoder_8frames_CITYSCAPES_RGB_42/model_last.pth # checkpoints/ae_rgb_8f_cityscapes.pth
+ae_cond_config: configs/vae/2x128x128.yaml
+ae_cond_model: Archived_AE/autoencoder_2frames_CITYSCAPES_RGB_42/model_last.pth # checkpoints/ae_rgb_2f_cityscapes.pth
+
+fm_config: configs/singlemodal/DiT_S_128x128.yaml

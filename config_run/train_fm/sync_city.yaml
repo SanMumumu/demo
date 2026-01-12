@@ -1,0 +1,18 @@
+exp: mmfm
+id: DiT_B
+data: CITYSCAPES_RGBD
+data_folder: data
+n_gpus: 4
+batch_size: 4
+
+ae_config: configs/vae/8x128x128.yaml
+ae_cond_config: configs/vae/2x128x128.yaml
+
+ae_model: checkpoints/ae_rgb_8f_cityscapes.pth # checkpoints/ae_rgb_8f_cityscapes.pth
+ae_cond_model: checkpoints/ae_rgb_2f_cityscapes.pth # checkpoints/ae_rgb_2f_cityscapes.pth
+ae_model_depth: checkpoints/ae_depth_8f_cityscapes.pth
+ae_cond_model_depth: checkpoints/ae_depth_2f_cityscapes.pth
+
+fm_config: configs/multimodal/DiT_B_128x128.yaml # configs/flowmatching/sync_128x128.yaml
+#fm_rgb_model: results/_single_mod_CITY_RGB_42/ema_model_last.pth
+#fm_depth_model: results/_single_mod_CITY_DEPTH_42/ema_model_last.pth
