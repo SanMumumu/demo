@@ -13,4 +13,4 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 main.py --config config_run/train_fm/fm_cit
 python3 main.py --config configs/run/train/ddpm_city_rgb.yaml
 
 
-tensorboard --logdir=/mnt/data/wangsen/SyncVP/results/ddpm_single_mod_CITYSCAPES_RGB_42 --port=7004
+tensorboard --logdir=/mnt/data/wangsen/demo/results --port=7004

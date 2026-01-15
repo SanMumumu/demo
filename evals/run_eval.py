@@ -1,6 +1,7 @@
 import copy
 
-from models.vae.vae_vit_rope import ViTAutoencoder
+from models.autoencoder.autoencoder_vit import ViTAutoencoder
+from models.autoencoder.autoencoder_vit_rope import ViTAutoencoder
 from models.fm.DiT import FMWrapper, DiT
 from models.fm.uniDiT import FlowMatchingWrapper, UnifiedDiT
 from tools.dataloader import get_loaders
@@ -68,23 +69,20 @@ def flowmatching_eval(args):
     autoencoder_model = DummyWrapper(autoencoder_model).to(device)
     autoencoder_model.eval()
 
-    if args.ae_cond_model != '':
-        autoencoder_cond_model = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig)
-        autoencoder_cond_model.load_state_dict(torch.load(args.ae_cond_model))
-        autoencoder_cond_model = DummyWrapper(autoencoder_cond_model).to(device)
-        autoencoder_cond_model.eval()
-    else:
-        autoencoder_cond_model = autoencoder_model
+    autoencoder_cond_model = ViTAutoencoder(args.embed_dim, args.ae_cond_ddconfig)
+    autoencoder_cond_model.load_state_dict(torch.load(args.ae_cond_model))
+    autoencoder_cond_model = DummyWrapper(autoencoder_cond_model).to(device)
+    autoencoder_cond_model.eval()
 
     log_(f"Loading flow matching model")
-    backbone = DiT(**args.dit_config, frames=args.frames)
-    fm_model = FlowMatchingWrapper(backbone)
+    backbone = DiT(**args.dit_config, frames=8)
+    fm_model = FMWrapper(backbone)
     fm_model.load_state_dict(torch.load(args.fm_model))
     fm_model = DummyWrapper(fm_model).to(device)
     fm_model.eval()
 
     # Count flow matching model parameters
-    log_(f"Flow matching model has {sum(p.numel() for p in fm_model.parameters())} parameters")
+    log_(f"Flow matching model has {sum(p.numel() for p in fm_model.parameters()) / 1e6:.2f}M parameters")
 
     if args.train:
         samples = args.samples if args.samples > 0 else 256
@@ -95,7 +93,7 @@ def flowmatching_eval(args):
     log_(f"Evaluation on {samples} samples with {trajectories} generated samples")
 
     fvd, ssim, lpips = eval_flow_matching(0, fm_model, autoencoder_model, autoencoder_cond_model, test_loader, 0,
-                                      samples, logger, args.frames, args.cond_frames, trajectories)
+                                      samples, logger, args.frames, args.cond_frames, trajectories, sampling_timesteps=100)
     log_(f"FVD: {fvd}, SSIM: {ssim}, LPIPS: {lpips * 1000}")
 
 

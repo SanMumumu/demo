@@ -15,6 +15,7 @@ import os
 
 import torchvision
 import PIL
+from tqdm import tqdm
 
 
 def log_videos(gts, predictions, it, logger=None, modality=None):
@@ -124,7 +125,7 @@ def eval_autoencoder(rank, model, loader, it, samples, logger=None):
     save_samples = min(samples, 16)
 
     with torch.no_grad():
-        for n, (gt, _) in enumerate(loader):
+        for n, (gt, _) in enumerate(tqdm(loader, desc="Evaluating VAE")):
             k = gt.size(0)  # batch size
             if n >= samples // k:
                 break
@@ -203,7 +204,7 @@ def eval_flow_matching(rank, ema_model, ae, ae_cond, loader, it, samples=16, log
     video_grid = (int(np.sqrt(save_samples)), int(np.sqrt(save_samples)))
 
     with torch.no_grad():
-        for n, (x, _) in enumerate(loader):
+        for n, (x, _) in enumerate(tqdm(loader, desc="Evaluating Flow Matching")):
             k = x.size(0)  # batch size
             if n >= samples // k:  # useful to break earlier in case num samples is not the full dataset
                 break
@@ -269,7 +270,7 @@ def eval_flow_matching(rank, ema_model, ae, ae_cond, loader, it, samples=16, log
     predictions = torch.cat(predictions)
 
     if rank == 0:
-        log_videos(gts, predictions, it, logger)
+        log_videos(gts[:6], predictions[:6], it, logger)
 
     gt_embeddings = torch.cat(gt_embeddings)
     pred_embeddings = torch.cat(pred_embeddings)
@@ -316,7 +317,7 @@ def eval_multimodal_fm(rank, ema_model, ae_rgb, ae_depth, ae_cond_rgb, ae_cond_d
     save_samples = min(samples, 16)
 
     with torch.no_grad():
-        for n, (x_rgb, x_depth, _) in enumerate(loader):
+        for n, (x_rgb, x_depth, _) in enumerate(tqdm(loader, desc="Evaluating Multimodal FM")):
             k = x_rgb.size(0)
             if n >= samples // k:
                 break
